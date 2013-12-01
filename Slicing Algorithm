@@ -1,0 +1,154 @@
+
+//slicing to a job file!
+void B9Layout::SliceWorldToJob(QString filename)
+{
+
+    unsigned int m;
+    unsigned int i;
+    unsigned int l;
+    unsigned int numlayers;
+    int nummodels = 0;
+    double zhieght = project->GetBuildSpace().z();
+    double thickness = project->GetPixelThickness()*0.001;
+    int xsize = project->GetResolution().x();
+    int ysize = project->GetResolution().y();
+    QString jobname = project->GetJobName();
+    QString jobdesc = project->GetJobDescription();
+    int x;
+    int y;
+    QRgb pickedcolor;
+    QRgb mastercolor;
+    QPixmap pix;
+    QImage img(xsize,ysize, QImage::Format_ARGB32_Premultiplied);
+    QImage imgfrommaster(xsize,ysize, QImage::Format_ARGB32_Premultiplied);
+    CrushedPrintJob* pMasterJob = NULL;
+
+
+    
+    //calculate how many layers we need
+    numlayers = qCeil(zhieght/thickness);
+    //calculate how many models there are
+    for(m=0;m<ModelDataList.size();m++)
+    {
+        for(i=0;i<ModelDataList[m]->instList.size();i++)
+        {
+            nummodels++;
+        }
+    }
+    //make a loading bar
+    LoadingBar progressbar(0, numlayers, this);
+    QObject::connect(&progressbar,SIGNAL(rejected()),this,SLOT(CancelSlicing()));
+    progressbar.setDescription("Processing Layout..");
+    progressbar.setValue(0);
+    QApplication::processEvents();
+
+
+    SliceContext paintwidget(NULL, this);
+    paintwidget.makeCurrent();
+
+    //make a master job file for use later
+    pMasterJob = new CrushedPrintJob();
+    pMasterJob->setName(jobname);
+    pMasterJob->setDescription(jobdesc);
+    pMasterJob->setXYPixel(QString().number(project->GetPixelSize()/1000));
+    pMasterJob->setZLayer(QString().number(project->GetPixelThickness()/1000));
+    
+
+
+    pMasterJob->clearAll(numlayers);//fills the master job with the needed layers
+
+    progressbar.setDescription("Slicing Layout..");
+    progressbar.setMax(numlayers*nummodels);
+    progressbar.setValue(0);
+    //FOR Each Model Instance
+    for(m=0;m<ModelDataList.size();m++)
+    {
+        for(i=0;i<ModelDataList[m]->instList.size();i++)
+        {
+            ModelInstance* inst = ModelDataList[m]->instList[i];
+            inst->BakeGeometry();
+            
+            //slice all layers and add to instance's job file
+            for(l = 0; l < numlayers; l++)
+            {
+                //if we are in the model's z - bounds
+                if((double)l*thickness <= inst->GetMaxBound().z() && (double)l*thickness >= inst->GetMinBound().z()-0.5*thickness)
+                {
+                    //ACTUALLY Generate the Slice.
+                    inst->pSliceSet->GenerateSlice(l*thickness + thickness*0.5);
+                    paintwidget.SetSlice(inst->pSliceSet->pSliceData);
+                    
+
+                    pix = paintwidget.renderPixmap(xsize,ysize);
+                    img = pix.toImage();
+                    
+                
+                    for(x = 0; x < xsize; x++)
+                    {
+                        for(y = 0; y < ysize; y++)
+                        {
+                            pickedcolor = img.pixel(x,y);
+                            if(qRed(pickedcolor) || qGreen(pickedcolor))
+                            {
+                                int result = qRed(pickedcolor) - qGreen(pickedcolor);
+                                if(result > 0)
+                                {
+                                    result = 255;
+                                }
+                                img.setPixel(x,y,QColor(result,0,0,result).rgba());
+                            }
+                        }
+                    }
+                    
+                    QApplication::processEvents();
+                    imgfrommaster.fill(Qt::black);
+                    pMasterJob->setCurrentSlice(l);
+                    pMasterJob->inflateCurrentSlice(&imgfrommaster);
+                    if(imgfrommaster.size() == QSize(0,0))
+                    {
+                        imgfrommaster = QImage(xsize,ysize,QImage::Format_ARGB32_Premultiplied);
+                        imgfrommaster.fill(Qt::black);
+                    }
+                    for(x = 0; x < xsize; x++)
+                    {
+                        for(y = 0; y < ysize; y++)
+                        {
+                            pickedcolor = img.pixel(x,y);
+                            mastercolor = imgfrommaster.pixel(x,y); 
+                            if(qRed(pickedcolor) || qRed(mastercolor))
+                            {
+                                imgfrommaster.setPixel(x,y,QColor(255,255,255).rgb());
+                            }
+                        }
+                    }
+                    pMasterJob->crushCurrentSlice(&imgfrommaster);
+                    QApplication::processEvents();
+
+                    //update progress bar
+                    progressbar.setValue(progressbar.GetValue() + 1);
+                
+                    if(cancelslicing)
+                    {
+                        cancelslicing = false;
+                        delete pMasterJob;
+                        pWorldView->makeCurrent();
+                        inst->UnBakeGeometry();
+                        return;
+                    }
+                }
+            }
+            inst->UnBakeGeometry();
+        }
+    }
+    
+    QFile* pf = new QFile(filename);
+
+    pMasterJob->saveCPJ(pf);
+    delete pf;
+    delete pMasterJob;
+    
+
+    pWorldView->makeCurrent();
+
+    cancelslicing = false;
+} 
